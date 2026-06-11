@@ -20,16 +20,8 @@ You **MUST** consider the user input before proceeding (if not empty).
 
 ## Pre-Execution Checks
 
-**Check for extension hooks (before specification)**:
-- Check if `.specify/extensions.yml` exists in the project root.
-- If it exists, read it and look for entries under the `hooks.before_specify` key
-- If the YAML cannot be parsed or is invalid, skip hook checking silently and continue normally
-- Filter out hooks where `enabled` is explicitly `false`. Treat hooks without an `enabled` field as enabled by default.
-- For each remaining hook, do **not** attempt to interpret or evaluate hook `condition` expressions:
-  - If the hook has no `condition` field, or it is null/empty, treat the hook as executable
-  - If the hook defines a non-empty `condition`, skip the hook and leave condition evaluation to the HookExecutor implementation
-- For each executable hook, output the following based on its `optional` flag:
-  - **Optional hook** (`optional: true`):
+If `.specify/extensions.yml` exists in the project root, read entries under `hooks.before_specify`; unparsable/invalid YAML → skip hook checking silently and continue normally. Filter out hooks with `enabled` explicitly `false` (missing `enabled` = enabled). Do **not** interpret or evaluate hook `condition` expressions: missing/null/empty `condition` = executable; non-empty = skip the hook (left to the HookExecutor implementation). For each executable hook, output by its `optional` flag:
+- `optional: true`:
     ```
     ## Extension Hooks
 
@@ -40,7 +32,7 @@ You **MUST** consider the user input before proceeding (if not empty).
     Prompt: {prompt}
     To execute: `/{command}`
     ```
-  - **Mandatory hook** (`optional: false`):
+- `optional: false`:
     ```
     ## Extension Hooks
 
@@ -50,99 +42,59 @@ You **MUST** consider the user input before proceeding (if not empty).
 
     Wait for the result of the hook command before proceeding to the Outline.
     ```
-- If no hooks are registered or `.specify/extensions.yml` does not exist, skip silently
+
+No registered hooks or no `.specify/extensions.yml`: skip silently.
 
 ## Outline
 
-The text the user typed after `__SPECKIT_COMMAND_SPECIFY__` in the triggering message **is** the feature description. Assume you always have it available in this conversation even if `{ARGS}` appears literally below. Do not ask the user to repeat it unless they provided an empty command.
+Text the user typed after `__SPECKIT_COMMAND_SPECIFY__` in the triggering message **is** the feature description — available even if `{ARGS}` appears literally below; do not ask the user to repeat it unless they provided an empty command. Then:
 
-Given that feature description, do this:
+1. **Generate a concise short name** (2-4 words): meaningful keywords, action-noun format when possible (e.g., "add-user-auth", "fix-payment-bug"), preserve technical terms/acronyms (OAuth2, API, JWT), descriptive at a glance. Examples: "Implement OAuth2 integration for the API" → "oauth2-api-integration"; "Fix payment processing timeout bug" → "fix-payment-timeout".
 
-1. **Generate a concise short name** (2-4 words) for the feature:
-   - Analyze the feature description and extract the most meaningful keywords
-   - Create a 2-4 word short name that captures the essence of the feature
-   - Use action-noun format when possible (e.g., "add-user-auth", "fix-payment-bug")
-   - Preserve technical terms and acronyms (OAuth2, API, JWT, etc.)
-   - Keep it concise but descriptive enough to understand the feature at a glance
-   - Examples:
-     - "I want to add user authentication" → "user-auth"
-     - "Implement OAuth2 integration for the API" → "oauth2-api-integration"
-     - "Create a dashboard for analytics" → "analytics-dashboard"
-     - "Fix payment processing timeout bug" → "fix-payment-timeout"
-
-2. **Branch creation** (optional, via hook):
-
-   If a `before_specify` hook ran successfully in the Pre-Execution Checks above, it will have created/switched to a git branch and output JSON containing `BRANCH_NAME` and `FEATURE_NUM`. Note these values for reference, but the branch name does **not** dictate the spec directory name.
-
-   If the user explicitly provided `GIT_BRANCH_NAME`, pass it through to the hook so the branch script uses the exact value as the branch name (bypassing all prefix/suffix generation).
+2. **Branch creation** (optional, via hook): a successful `before_specify` hook created/switched to a git branch and output JSON with `BRANCH_NAME` and `FEATURE_NUM`. Note them; the branch name does **not** dictate the spec directory name. A user-provided `GIT_BRANCH_NAME` passes through to the hook as the exact branch name (bypassing all prefix/suffix generation).
 
 3. **Create the spec feature directory**:
 
-   Specs live under the default `specs/` directory unless the user explicitly provides `SPECIFY_FEATURE_DIRECTORY`.
+   Resolve `SPECIFY_FEATURE_DIRECTORY`:
+   1. Explicit user value (env var/argument/config): use as-is.
+   2. Otherwise auto-generate under the default `specs/`:
+      - Check `.specify/init-options.json` for `feature_numbering` (preferred) or `branch_numbering` (deprecated, migration only, will be removed)
+      - `"timestamp"` → prefix `YYYYMMDD-HHMMSS` (current timestamp); `"sequential"`/absent → prefix `NNN` (next available 3-digit number after scanning `specs/`)
+      - Directory name `<prefix>-<short-name>` (e.g., `003-user-auth` or `20260319-143022-user-auth`); set `SPECIFY_FEATURE_DIRECTORY` to `specs/<directory-name>`
+      - `branch_numbering` used without `feature_numbering` → one-line warning: "⚠️ `branch_numbering` in init-options.json is deprecated. Rename to `feature_numbering`."
 
-   **Resolution order for `SPECIFY_FEATURE_DIRECTORY`**:
-   1. If the user explicitly provided `SPECIFY_FEATURE_DIRECTORY` (e.g., via environment variable, argument, or configuration), use it as-is
-   2. Otherwise, auto-generate it under `specs/`:
-      - Check `.specify/init-options.json` for `feature_numbering` (preferred) or `branch_numbering` (deprecated, migration only — will be removed in a future release)
-      - If `"timestamp"`: prefix is `YYYYMMDD-HHMMSS` (current timestamp)
-      - If `"sequential"` or absent: prefix is `NNN` (next available 3-digit number after scanning existing directories in `specs/`)
-      - Construct the directory name: `<prefix>-<short-name>` (e.g., `003-user-auth` or `20260319-143022-user-auth`)
-      - Set `SPECIFY_FEATURE_DIRECTORY` to `specs/<directory-name>`
-      - If `branch_numbering` was used (and `feature_numbering` was absent), emit a one-line warning: "⚠️ `branch_numbering` in init-options.json is deprecated. Rename to `feature_numbering`."
-
-   **Create the directory and spec file**:
+   Then:
    - `mkdir -p SPECIFY_FEATURE_DIRECTORY`
-   - Resolve the active `spec-template` through the Spec Kit preset/template resolution stack (equivalent to `specify preset resolve spec-template`)
-   - Copy the resolved `spec-template` file to `SPECIFY_FEATURE_DIRECTORY/spec.md` as the starting point
-   - Set `SPEC_FILE` to `SPECIFY_FEATURE_DIRECTORY/spec.md`
+   - Resolve the active `spec-template` via the Spec Kit preset/template resolution stack (equivalent to `specify preset resolve spec-template`); copy it to `SPECIFY_FEATURE_DIRECTORY/spec.md` and set `SPEC_FILE` to that path
    - Persist the resolved path to `.specify/feature.json`:
      ```json
      {
        "feature_directory": "<resolved feature dir>"
      }
      ```
-     Write the actual resolved directory path value (for example, `specs/003-user-auth`), not the literal string `SPECIFY_FEATURE_DIRECTORY`.
-     This allows downstream commands (`__SPECKIT_COMMAND_PLAN__`, `__SPECKIT_COMMAND_TASKS__`, etc.) to locate the feature directory without relying on git branch name conventions.
+     Write the actual resolved path (e.g., `specs/003-user-auth`), not the literal `SPECIFY_FEATURE_DIRECTORY`; downstream commands (`__SPECKIT_COMMAND_PLAN__`, `__SPECKIT_COMMAND_TASKS__`, etc.) read it to locate the feature directory without relying on git branch names.
 
-   **IMPORTANT**:
-   - You must only create one feature per `__SPECKIT_COMMAND_SPECIFY__` invocation
-   - The spec directory name and the git branch name are independent — they may be the same but that is the user's choice
-   - The spec directory and file are always created by this command, never by the hook
+   **IMPORTANT**: only one feature per `__SPECKIT_COMMAND_SPECIFY__` invocation; spec directory and git branch names are independent (matching is the user's choice); spec directory and file are always created by this command, never by the hook.
 
-4. Load the resolved active `spec-template` file to understand required sections.
+4. Load the resolved active `spec-template` for its required sections.
 
-5. **IF EXISTS**: Load `/memory/constitution.md` for project principles and governance constraints.
+5. **IF EXISTS**: Load `/memory/constitution.md` for principles and governance constraints.
 
-6. Follow this execution flow:
-    1. Parse user description from arguments
-       If empty: ERROR "No feature description provided"
-    2. Extract key concepts from description
-       Identify: actors, actions, data, constraints
-    3. For unclear aspects:
-       - Make informed guesses based on context and industry standards
-       - Only mark with [NEEDS CLARIFICATION: specific question] if:
-         - The choice significantly impacts feature scope or user experience
-         - Multiple reasonable interpretations exist with different implications
-         - No reasonable default exists
-       - **LIMIT: Maximum 3 [NEEDS CLARIFICATION] markers total**
-       - Prioritize clarifications by impact: scope > security/privacy > user experience > technical details
-    4. Fill User Scenarios & Testing section
-       If no clear user flow: ERROR "Cannot determine user scenarios"
-    5. Generate Functional Requirements
-       Each requirement must be testable
-       Use reasonable defaults for unspecified details (document assumptions in Assumptions section)
-    6. Define Success Criteria
-       Create measurable, technology-agnostic outcomes
-       Include both quantitative metrics (time, performance, volume) and qualitative measures (user satisfaction, task completion)
-       Each criterion must be verifiable without implementation details
+6. Execution flow:
+    1. Parse user description from arguments; empty → ERROR "No feature description provided"
+    2. Extract key concepts: actors, actions, data, constraints
+    3. Unclear aspects: informed guesses from context and industry standards; mark [NEEDS CLARIFICATION: specific question] only when the choice significantly impacts feature scope or user experience, multiple reasonable interpretations diverge in implications, or no reasonable default exists. **LIMIT: max 3 [NEEDS CLARIFICATION] markers total**; priority: scope > security/privacy > user experience > technical details
+    4. Fill User Scenarios & Testing; no clear user flow → ERROR "Cannot determine user scenarios"
+    5. Generate Functional Requirements, each testable; reasonable defaults for unspecified details (document in Assumptions)
+    6. Define Success Criteria: measurable, technology-agnostic outcomes; quantitative metrics (time, performance, volume) and qualitative measures (user satisfaction, task completion); each verifiable without implementation details
     7. Identify Key Entities (if data involved)
     8. Return: SUCCESS (spec ready for planning)
 
-6. Write the specification to SPEC_FILE using the template structure, replacing placeholders with concrete details derived from the feature description (arguments) while preserving section order and headings.
+6. Write the spec to SPEC_FILE using the template structure, replacing placeholders with concrete details from the feature description (arguments), preserving section order and headings.
 
-7. **Specification Quality Validation**: After writing the initial spec, validate it against quality criteria:
+7. **Specification Quality Validation**:
 
-   a. **Create Spec Quality Checklist**: Generate a checklist file at `SPECIFY_FEATURE_DIRECTORY/checklists/requirements.md` using the checklist template structure with these validation items:
+   a. Create `SPECIFY_FEATURE_DIRECTORY/checklists/requirements.md` (checklist template structure) with these items:
 
       ```markdown
       # Specification Quality Checklist: [FEATURE NAME]
@@ -181,24 +133,15 @@ Given that feature description, do this:
       - Items marked incomplete require spec updates before `__SPECKIT_COMMAND_CLARIFY__` or `__SPECKIT_COMMAND_PLAN__`
       ```
 
-   b. **Run Validation Check**: Review the spec against each checklist item:
-      - For each item, determine if it passes or fails
-      - Document specific issues found (quote relevant spec sections)
+   b. Review the spec against each checklist item: pass/fail; document specific issues (quote spec sections).
 
-   c. **Handle Validation Results**:
-
-      - **If all items pass**: Mark checklist complete and proceed to the Mandatory Post-Execution Hooks section
-
-      - **If items fail (excluding [NEEDS CLARIFICATION])**:
-        1. List the failing items and specific issues
-        2. Update the spec to address each issue
-        3. Re-run validation until all items pass (max 3 iterations)
-        4. If still failing after 3 iterations, document remaining issues in checklist notes and warn user
-
-      - **If [NEEDS CLARIFICATION] markers remain**:
+   c. Handle results:
+      - **All items pass**: mark checklist complete; proceed to Mandatory Post-Execution Hooks.
+      - **Items fail (excluding [NEEDS CLARIFICATION])**: list failing items and specific issues; update the spec to address each; re-run validation until all pass (max 3 iterations); still failing after 3 → document remaining issues in checklist notes and warn user.
+      - **[NEEDS CLARIFICATION] markers remain**:
         1. Extract all [NEEDS CLARIFICATION: ...] markers from the spec
-        2. **LIMIT CHECK**: If more than 3 markers exist, keep only the 3 most critical (by scope/security/UX impact) and make informed guesses for the rest
-        3. For each clarification needed (max 3), present options to user in this format:
+        2. **LIMIT CHECK**: more than 3 → keep the 3 most critical (by scope/security/UX impact), informed guesses for the rest
+        3. Present options for each clarification (max 3) in this format:
 
            ```markdown
            ## Question [N]: [Topic]
@@ -219,33 +162,21 @@ Given that feature description, do this:
            **Your choice**: _[Wait for user response]_
            ```
 
-        4. **CRITICAL - Table Formatting**: Ensure markdown tables are properly formatted:
-           - Use consistent spacing with pipes aligned
-           - Each cell should have spaces around content: `| Content |` not `|Content|`
-           - Header separator must have at least 3 dashes: `|--------|`
-           - Test that the table renders correctly in markdown preview
+        4. **CRITICAL - Table Formatting**: pipes aligned, consistent spacing; spaces around cell content (`| Content |` not `|Content|`); header separator at least 3 dashes (`|--------|`); test that the table renders correctly in markdown preview
         5. Number questions sequentially (Q1, Q2, Q3 - max 3 total)
         6. Present all questions together before waiting for responses
-        7. Wait for user to respond with their choices for all questions (e.g., "Q1: A, Q2: Custom - [details], Q3: B")
-        8. Update the spec by replacing each [NEEDS CLARIFICATION] marker with the user's selected or provided answer
+        7. Wait for choices for all questions (e.g., "Q1: A, Q2: Custom - [details], Q3: B")
+        8. Replace each [NEEDS CLARIFICATION] marker with the selected or provided answer
         9. Re-run validation after all clarifications are resolved
 
-   d. **Update Checklist**: After each validation iteration, update the checklist file with current pass/fail status
+   d. Update the checklist's pass/fail status after each validation iteration.
 
 ## Mandatory Post-Execution Hooks
 
 **You MUST complete this section before reporting completion to the user.**
 
-Check if `.specify/extensions.yml` exists in the project root.
-- If it does not exist, or no hooks are registered under `hooks.after_specify`, skip to the Completion Report.
-- If it exists, read it and look for entries under the `hooks.after_specify` key.
-- If the YAML cannot be parsed or is invalid, skip hook checking silently and continue to the Completion Report.
-- Filter out hooks where `enabled` is explicitly `false`. Treat hooks without an `enabled` field as enabled by default.
-- For each remaining hook, do **not** attempt to interpret or evaluate hook `condition` expressions:
-  - If the hook has no `condition` field, or it is null/empty, treat the hook as executable
-  - If the hook defines a non-empty `condition`, skip the hook and leave condition evaluation to the HookExecutor implementation
-- For each executable hook, output the following based on its `optional` flag:
-  - **Mandatory hook** (`optional: false`) — **You MUST emit `EXECUTE_COMMAND:` for each mandatory hook**:
+If `.specify/extensions.yml` is missing, has no entries under `hooks.after_specify`, or its YAML is unparsable/invalid, skip (silently) to the Completion Report. Otherwise apply the Pre-Execution Checks rules (`enabled` filtering, `condition` handling) to `hooks.after_specify`; for each executable hook, output by its `optional` flag:
+- `optional: false` — **You MUST emit `EXECUTE_COMMAND:` for each mandatory hook**:
     ```
     ## Extension Hooks
 
@@ -253,7 +184,7 @@ Check if `.specify/extensions.yml` exists in the project root.
     Executing: `/{command}`
     EXECUTE_COMMAND: {command}
     ```
-  - **Optional hook** (`optional: true`):
+- `optional: true`:
     ```
     ## Extension Hooks
 
@@ -267,77 +198,31 @@ Check if `.specify/extensions.yml` exists in the project root.
 
 ## Completion Report
 
-Report completion to the user with:
-- `SPECIFY_FEATURE_DIRECTORY` — the feature directory path
-- `SPEC_FILE` — the spec file path
-- Checklist results summary
-- Readiness for the next phase (`__SPECKIT_COMMAND_CLARIFY__` or `__SPECKIT_COMMAND_PLAN__`)
-
-**NOTE:** Branch creation is handled by the `before_specify` hook (git extension). Spec directory and file creation are always handled by this core command.
+Report to the user: `SPECIFY_FEATURE_DIRECTORY`, `SPEC_FILE`, checklist results summary, and readiness for the next phase (`__SPECKIT_COMMAND_CLARIFY__` or `__SPECKIT_COMMAND_PLAN__`). (Branch creation: `before_specify` hook, git extension; spec directory/file: always this core command.)
 
 ## Quick Guidelines
 
-- Focus on **WHAT** users need and **WHY**.
-- Avoid HOW to implement (no tech stack, APIs, code structure).
-- Written for business stakeholders, not developers.
-- DO NOT create any checklists that are embedded in the spec. That will be a separate command.
-
-### Section Requirements
-
-- **Mandatory sections**: Must be completed for every feature
-- **Optional sections**: Include only when relevant to the feature
-- When a section doesn't apply, remove it entirely (don't leave as "N/A")
+- Focus on **WHAT** users need and **WHY**; avoid HOW (no tech stack, APIs, code structure); write for business stakeholders, not developers.
+- DO NOT create checklists embedded in the spec — separate command.
+- Complete all mandatory sections; include optional sections only when relevant; remove non-applicable sections entirely (don't leave as "N/A").
 
 ### For AI Generation
 
-When creating this spec from a user prompt:
-
-1. **Make informed guesses**: Use context, industry standards, and common patterns to fill gaps
-2. **Document assumptions**: Record reasonable defaults in the Assumptions section
-3. **Limit clarifications**: Maximum 3 [NEEDS CLARIFICATION] markers - use only for critical decisions that:
-   - Significantly impact feature scope or user experience
-   - Have multiple reasonable interpretations with different implications
-   - Lack any reasonable default
+1. **Make informed guesses**: fill gaps from context, industry standards, and common patterns
+2. **Document assumptions**: record reasonable defaults in the Assumptions section
+3. **Limit clarifications**: max 3 [NEEDS CLARIFICATION] markers — same critical-decision criteria as execution-flow step 3
 4. **Prioritize clarifications**: scope > security/privacy > user experience > technical details
-5. **Think like a tester**: Every vague requirement should fail the "testable and unambiguous" checklist item
-6. **Common areas needing clarification** (only if no reasonable default exists):
-   - Feature scope and boundaries (include/exclude specific use cases)
-   - User types and permissions (if multiple conflicting interpretations possible)
-   - Security/compliance requirements (when legally/financially significant)
+5. **Think like a tester**: every vague requirement should fail the "testable and unambiguous" checklist item
+6. **Common areas needing clarification** (only if no reasonable default exists): feature scope and boundaries (include/exclude use cases); user types and permissions (if conflicting interpretations possible); security/compliance requirements (when legally/financially significant)
 
-**Examples of reasonable defaults** (don't ask about these):
-
-- Data retention: Industry-standard practices for the domain
-- Performance targets: Standard web/mobile app expectations unless specified
-- Error handling: User-friendly messages with appropriate fallbacks
-- Authentication method: Standard session-based or OAuth2 for web apps
-- Integration patterns: Use project-appropriate patterns (REST/GraphQL for web services, function calls for libraries, CLI args for tools, etc.)
+**Reasonable defaults** (don't ask): industry-standard data retention for the domain; standard web/mobile performance targets unless specified; user-friendly error messages with appropriate fallbacks; standard session-based or OAuth2 authentication for web apps; project-appropriate integration patterns (REST/GraphQL for web services, function calls for libraries, CLI args for tools, etc.)
 
 ### Success Criteria Guidelines
 
-Success criteria must be:
-
-1. **Measurable**: Include specific metrics (time, percentage, count, rate)
-2. **Technology-agnostic**: No mention of frameworks, languages, databases, or tools
-3. **User-focused**: Describe outcomes from user/business perspective, not system internals
-4. **Verifiable**: Can be tested/validated without knowing implementation details
-
-**Good examples**:
-
-- "Users can complete checkout in under 3 minutes"
-- "System supports 10,000 concurrent users"
-- "95% of searches return results in under 1 second"
-- "Task completion rate improves by 40%"
-
-**Bad examples** (implementation-focused):
-
-- "API response time is under 200ms" (too technical, use "Users see results instantly")
-- "Database can handle 1000 TPS" (implementation detail, use user-facing metric)
-- "React components render efficiently" (framework-specific)
-- "Redis cache hit rate above 80%" (technology-specific)
+Must be **measurable** (time, percentage, count, rate), **technology-agnostic** (no frameworks, languages, databases, or tools), **user-focused** (user/business outcomes, not system internals), and **verifiable** without implementation details. Good: "Users can complete checkout in under 3 minutes", "System supports 10,000 concurrent users", "95% of searches return results in under 1 second", "Task completion rate improves by 40%". Bad: "API response time is under 200ms" (too technical, use "Users see results instantly"), "Database can handle 1000 TPS" (implementation detail, use user-facing metric), "React components render efficiently" (framework-specific), "Redis cache hit rate above 80%" (technology-specific).
 
 ## Done When
 
 - [ ] Specification written to `SPEC_FILE` and validated against quality checklist
-- [ ] Extension hooks dispatched or skipped according to the rules in Mandatory Post-Execution Hooks above
+- [ ] Extension hooks dispatched or skipped per Mandatory Post-Execution Hooks
 - [ ] Completion reported to user with feature directory, spec file path, and checklist results
